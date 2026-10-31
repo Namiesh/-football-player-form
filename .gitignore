@@ -1,0 +1,43 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Machine learning model artifacts (large binary files)
+*.joblib
+*.pkl
+models/*.joblib
+models/*.pkl
+!models/.gitkeep
+
+# Data directories
+data/raw/*
+!data/raw/.gitkeep
+# Ignore generated/synced processed datasets, but keep the offline sample fallback dataset
+data/processed/*
+!data/processed/.gitkeep
+!data/processed/player_match_stats.csv
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
