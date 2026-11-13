@@ -3,8 +3,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from engines import calibrate_consistency_k, current_summary, latest_feature_row, prepare_match_scores, project_next_form, train_predictor
-from xpoints import project_team_xpoints, team_match_xpoints
+from engines import calibrate_consistency_k, current_summary, latest_feature_row, prepare_match_scores, project_next_form, project_team_xpoints, team_match_xpoints, train_predictor
 
 ROOT = Path(__file__).resolve().parent
 API_DATA = ROOT / "data" / "processed" / "player_match_stats_api.csv"
