@@ -37,6 +37,8 @@ Each match metric is converted to a percentile within position group and competi
 
 The ML target is the player's next-match performance score. Features are built strictly from earlier appearances and evaluated with a chronological holdout to reduce leakage. This is a forecasting baseline, not a claim that the formula score is an objective ground-truth rating. xG and expected assists are supplied by the provider. Opponent strength and team form are not included in this first version.
 
+The app also includes an independent **team xPoints** component based on [McKay Johns' xPts method](https://mckayjohns.substack.com/p/how-to-calculate-expected-points): team and opponent xG are treated as Poisson goal rates, scoreline probabilities are summed into win/draw/loss probabilities, and `xPts = 3 × P(win) + P(draw)`. The upcoming estimate uses recency-weighted xG for and against from up to five prior team matches. It is shown on the selected player's page as team context; the article's method predicts team league points, not an individual player's fantasy points. If xG is missing for either team, xPoints is left unavailable rather than fabricated.
+
 ## Dataset notes
 
 The initial Premier League sync uses one call for the league list, one per season for fixtures, one per uncached finished match for its player-stat table, and a lineup call only when positions are missing. Player IDs are retained as the provider's stable identifiers. You can extend the same importer to other leagues exposed by the API.
