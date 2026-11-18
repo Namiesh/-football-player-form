@@ -1,44 +1,40 @@
 # Football Player Form Lab
 
-A Streamlit app with two separate components:
+Streamlit app for Premier League player form, next-appearance performance and team xPoints. Football data is read from the provided Opta S3 bucket; the app and training pipeline make no calls to a football-data API.
 
-1. **Player Form Rating Engine** — position-relative match scores, recency weighted form, consistency, minutes confidence and historical comparison.
-2. **ML Prediction Engine** — a time-ordered Random Forest model trained to predict a player's next appearance score and label the expected form direction.
+## S3 dataset
 
-## Current and historical data
+The importer reads only `matchstats.json` under `scrape-opta-data/football/<year>/premier-league-england/` and `scrape-opta-data/continuous-scrape-data/football/<year>/premier-league-england/`. It caches objects by S3 ETag and writes:
 
-The current-data importer uses [PitchAPI](https://pitchapi.dev/), which documents match-level player stats, stable player IDs, 2026-era data, and a free plan without a published request allowance. Its fair-use burst guard still applies. The default import is the Premier League 2025/26 and 2026/27 seasons. The upstream match stats contain minutes, goals, assists, xG, shots, passing, tackles, interceptions, duels, clearances and other position-dependent values. The importer requests one player-stats response per finished match, waits between uncached calls and saves each response, so later runs only request newly finished matches.
+- `data/processed/player_match_stats_s3.csv` — historical and current-season player appearances.
+- `data/processed/player_match_stats_2026_2027.csv` — current season.
 
-Create a free API key, copy `.env.example` to `.env`, and set `PITCHAPI_API_KEY` there. Keep `.env` private. Then build or update `data/processed/player_match_stats_api.csv`:
+Configure rotated, read-only AWS credentials locally with the AWS CLI. Do not put keys in this repository or send them in chat. Example:
 
 ```powershell
-python scripts/sync_pitchapi.py
+aws configure --profile football-form-readonly
+$env:AWS_PROFILE = "football-form-readonly"
+$env:AWS_REGION = "ap-south-1"
+python scripts/sync_s3_opta.py
 ```
 
-The sync also writes the 2026/27-only dataset to `data/processed/player_match_stats_2026_27.csv`. Change `PITCHAPI_LEAGUE` and `PITCHAPI_SEASONS` in `.env` to select other supported competitions/seasons. The Streamlit app prefers the PitchAPI dataset when present. The previous StatsBomb file remains as an archived fallback only.
+The importer defaults to calendar years 2023–2027; each match's season is read from its Opta calendar. The last sync found 1,220 matches across 2023/24–2026/27, including 80 matches in 2026/27 through 25 October 2026. The continuous bucket should be synced after it receives new matchstats files.
 
-Train and save the predictor and its chronological holdout metrics:
+## Train and run
 
 ```powershell
 python scripts/train_model.py
-```
-
-The trained artifact is written to `models/player_form_predictor.joblib` and its report to `models/player_form_metrics.json`.
-
-Then launch the app:
-
-```powershell
 streamlit run app.py
 ```
 
-## Method
+The trainer saves `models/player_form_predictor.joblib` and `models/player_form_metrics.json`. It evaluates a chronological holdout against a recent-form baseline; inspect both MAEs before relying on predictions. The target is the app's formula-derived match-score percentile, not an independently observed ground-truth rating.
 
-Each match metric is converted to a percentile within position group and competition-season. Negative events are reverse scored. Metrics are combined into a 0–100 match score. Current form is the supplied recency-decay formula, with match weights also scaled by minutes played. The overall view is `0.50 × F5 + 0.30 × F10 + 0.20 × F15`. A minutes-confidence adjustment pulls low-minute estimates toward 50.
+On the current snapshot, the model MAE is 7.66 form points versus 8.21 for the recent-form baseline, with R² 0.055. This is a small improvement with weak explanatory power; predictions are experimental, not a claim of high accuracy. Data currently ends 25 October 2026, so sync again when newer matches arrive.
 
-The ML target is the player's next-match performance score. Features are built strictly from earlier appearances and evaluated with a chronological holdout to reduce leakage. This is a forecasting baseline, not a claim that the formula score is an objective ground-truth rating. xG and expected assists are supplied by the provider. Opponent strength and team form are not included in this first version.
+## Method and data limits
 
-The app also includes an independent **team xPoints** component based on [McKay Johns' xPts method](https://mckayjohns.substack.com/p/how-to-calculate-expected-points): team and opponent xG are treated as Poisson goal rates, scoreline probabilities are summed into win/draw/loss probabilities, and `xPts = 3 × P(win) + P(draw)`. The upcoming estimate uses recency-weighted xG for and against from up to five prior team matches. It is shown on the selected player's page as team context; the article's method predicts team league points, not an individual player's fantasy points. If xG is missing for either team, xPoints is left unavailable rather than fabricated.
+Match scores use role-relative percentiles from available per-90 statistics. Form combines recency-weighted F5/F10/F15 with minutes confidence. The ML engine uses strictly prior appearances, including `days_rest`, and reports a chronological holdout.
 
-## Dataset notes
+The sampled S3 matchstats feed has stable player IDs, minutes, goals, assists, shots, passing, tackles, clearances and cards. It does not include shot-level xG/xA, explicit injuries, interceptions or recoveries. The app reduces rating confidence after a long appearance gap, but cannot determine whether a gap was caused by injury, rotation, suspension, transfer or missing data. Add an explicit injury-history feed to model injury status reliably.
 
-The initial Premier League sync uses one call for the league list, one per season for fixtures, one per uncached finished match for its player-stat table, and a lineup call only when positions are missing. Player IDs are retained as the provider's stable identifiers. You can extend the same importer to other leagues exposed by the API.
+The linked [xDanger article](https://marclamberts.medium.com/introducing-xdanger-one-ecosystem-for-shot-models-possession-value-models-and-ratings-a00f51663a1d) describes shot and possession models trained from event-level context. That feed is not present in the sampled S3 paths, so this app does not claim to reproduce xDanger. Team xPoints uses independent Poisson score probabilities and `3 × P(win) + P(draw)`, with recent goals for/against as a clearly labeled rate proxy because the supplied files have no xG.

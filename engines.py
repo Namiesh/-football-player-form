@@ -7,14 +7,13 @@ from sklearn.metrics import mean_absolute_error, r2_score
 
 WINDOWS = (5, 10, 15)
 WEIGHTS = {
-    "Goalkeeper": {"saves_p90": .28, "pass_accuracy": .16, "recoveries_p90": .12, "clearances_p90": .12, "pressures_p90": .08, "shots_on_target_p90": .08, "xg_p90": .08, "xa_p90": .08},
-    "Defender": {"tackles_won_p90": .16, "interceptions_p90": .14, "clearances_p90": .14, "blocks_p90": .10, "duels_won_p90": .10, "aerials_won_p90": .06, "pass_accuracy": .12, "recoveries_p90": .08, "xg_p90": .04, "xa_p90": .03, "dispossessed_p90": -.04, "fouls_p90": -.04},
-    "Defensive Midfielder": {"tackles_won_p90": .15, "interceptions_p90": .14, "recoveries_p90": .12, "duels_won_p90": .08, "pass_accuracy": .16, "xa_p90": .08, "key_passes_p90": .06, "carries_p90": .07, "pressures_p90": .08, "dispossessed_p90": -.03, "fouls_p90": -.03},
-    "Midfielder": {"pass_accuracy": .17, "xa_p90": .12, "key_passes_p90": .10, "tackles_won_p90": .10, "interceptions_p90": .08, "recoveries_p90": .08, "duels_won_p90": .07, "carries_p90": .09, "pressures_p90": .08, "xg_p90": .06, "dispossessed_p90": -.03, "fouls_p90": -.02},
-    "Forward": {"goals_p90": .20, "xg_p90": .16, "shots_on_target_p90": .10, "xa_p90": .10, "assists_p90": .08, "successful_dribbles_p90": .08, "key_passes_p90": .08, "pressures_p90": .06, "pass_accuracy": .05, "carries_p90": .05, "dispossessed_p90": -.02, "fouls_p90": -.02},
-    "Unknown": {"goals_p90": .14, "xg_p90": .12, "xa_p90": .10, "pass_accuracy": .12, "tackles_won_p90": .10, "interceptions_p90": .10, "recoveries_p90": .10, "pressures_p90": .08, "saves_p90": .08, "dispossessed_p90": -.03, "fouls_p90": -.03},
+    "Goalkeeper": {"saves_p90": .34, "clean_sheet_p90": .18, "goals_conceded_p90": -.20, "pass_accuracy": .14, "clearances_p90": .08, "fouls_p90": -.06},
+    "Defender": {"tackles_won_p90": .20, "clearances_p90": .20, "pass_accuracy": .15, "goals_p90": .12, "assists_p90": .08, "goals_conceded_p90": -.07, "yellow_cards_p90": -.05, "fouls_p90": -.05, "shots_on_target_p90": .04, "was_fouled_p90": .04},
+    "Midfielder": {"pass_accuracy": .20, "tackles_won_p90": .14, "goals_p90": .14, "assists_p90": .14, "shots_on_target_p90": .10, "accurate_passes_p90": .10, "was_fouled_p90": .05, "fouls_p90": -.05, "offsides_p90": -.02, "yellow_cards_p90": -.03, "clearances_p90": .03},
+    "Forward": {"goals_p90": .24, "shots_on_target_p90": .20, "assists_p90": .15, "shots_p90": .12, "passes_p90": .08, "pass_accuracy": .05, "was_fouled_p90": .05, "fouls_p90": -.04, "offsides_p90": -.05, "yellow_cards_p90": -.02},
+    "Unknown": {"goals_p90": .17, "assists_p90": .10, "shots_on_target_p90": .13, "pass_accuracy": .13, "tackles_won_p90": .12, "clearances_p90": .10, "saves_p90": .08, "goals_conceded_p90": -.07, "yellow_cards_p90": -.04, "fouls_p90": -.06},
 }
-COUNT_METRICS = ["goals", "assists", "shots", "shots_on_target", "passes", "accurate_passes", "key_passes", "carries", "dribbles", "successful_dribbles", "pressures", "interceptions", "clearances", "recoveries", "tackles", "tackles_won", "duels_won", "aerials", "aerials_won", "blocks", "fouls", "miscontrols", "dispossessed", "saves", "xg", "xa"]
+COUNT_METRICS = ["goals", "assists", "shots", "shots_on_target", "shots_off_target", "passes", "accurate_passes", "clearances", "tackles", "tackles_won", "fouls", "saves", "goals_conceded", "yellow_cards", "red_cards", "offsides", "clean_sheet", "was_fouled"]
 
 
 def prepare_match_scores(raw: pd.DataFrame) -> pd.DataFrame:
@@ -79,14 +78,22 @@ def calibrate_consistency_k(scored: pd.DataFrame) -> float:
     return 30.0 / max(median, 1.0)
 
 
-def current_summary(player: pd.DataFrame, decay: float = .22, k: float = .65) -> dict:
+def current_summary(player: pd.DataFrame, decay: float = .22, k: float = .65,
+                    as_of: pd.Timestamp | None = None) -> dict:
     player = player.sort_values(["match_date", "match_id"])
     scores = player["match_score"].to_numpy(float)
     minutes = player["minutes"].to_numpy(float)
     fn = {n: recency_form(scores[-n:], minutes[-n:], decay) for n in WINDOWS}
     combined = .50 * fn[5] + .30 * fn[10] + .20 * fn[15]
     total_mins = float(minutes[-15:].sum())
-    confidence = min(1.0, np.sqrt(total_mins / 450))
+    minutes_confidence = min(1.0, np.sqrt(total_mins / 450))
+    as_of = pd.Timestamp.now(tz="UTC") if as_of is None else pd.to_datetime(as_of, utc=True)
+    last_date = pd.to_datetime(player.iloc[-1]["match_date"], utc=True)
+    days_since_last = max(0.0, (as_of - last_date).total_seconds() / 86400)
+    # The performance estimate stays the same, but confidence fades during a
+    # long no-appearance gap. This is not an injury diagnosis.
+    freshness = float(np.exp(-max(0.0, days_since_last - 7.0) / 90.0))
+    confidence = minutes_confidence * freshness
     adjusted = float(np.clip(50 + confidence * (combined - 50), 1, 100))
     last5 = scores[-5:]
     prior5 = scores[-10:-5]
@@ -94,6 +101,8 @@ def current_summary(player: pd.DataFrame, decay: float = .22, k: float = .65) ->
     hist_avg = float(np.mean(scores)) if len(scores) else 50.0
     return {"form_5": fn[5], "form_10": fn[10], "form_15": fn[15], "overall_form": adjusted,
             "raw_overall_form": combined, "confidence": confidence, "consistency": consistency_score(last5, k),
+            "minutes_confidence": minutes_confidence, "freshness": freshness,
+            "days_since_last_appearance": days_since_last,
             "trend_points": trend, "trend": "Improving" if trend >= 4 else ("Declining" if trend <= -4 else "Stable"),
             "historical_average": hist_avg, "vs_history": adjusted - hist_avg,
             "appearances": len(player), "minutes_last_15": total_mins}
@@ -120,11 +129,11 @@ def _goal_probabilities(xg: float, max_goals: int = 10) -> np.ndarray:
     return probs
 
 
-def expected_points(xg_for: float, xg_against: float) -> dict[str, float]:
-    """Team expected league points (0..3), from xG-based W/D/L chances."""
-    if pd.isna(xg_for) or pd.isna(xg_against):
+def expected_points(goals_for_rate: float, goals_against_rate: float) -> dict[str, float]:
+    """Expected league points (0..3) from two independent Poisson goal rates."""
+    if pd.isna(goals_for_rate) or pd.isna(goals_against_rate):
         return {"p_win": np.nan, "p_draw": np.nan, "p_loss": np.nan, "xpoints": np.nan}
-    matrix = np.outer(_goal_probabilities(xg_for), _goal_probabilities(xg_against))
+    matrix = np.outer(_goal_probabilities(goals_for_rate), _goal_probabilities(goals_against_rate))
     p_win = float(np.tril(matrix, -1).sum())
     p_draw = float(np.trace(matrix))
     p_loss = float(np.triu(matrix, 1).sum())
@@ -133,43 +142,81 @@ def expected_points(xg_for: float, xg_against: float) -> dict[str, float]:
 
 
 def team_match_xpoints(matches: pd.DataFrame) -> pd.DataFrame:
-    """Build one row per team-match from player xG totals in the dataset."""
-    needed = {"match_id", "team", "opponent", "xg"}
+    """Estimate pre-match team xPoints from prior team and opponent goal rates.
+
+    The supplied Opta matchstats feed has no xG or attack-level shot data, so
+    this is a transparent goals-history estimate, not xG or xDanger.
+    """
+    needed = {"match_id", "team", "opponent", "goals_for", "goals_against", "match_date"}
     if not needed.issubset(matches.columns):
-        return pd.DataFrame(columns=["match_id", "team", "opponent", "xg_for", "xg_against", "xpoints"])
-    keys = [c for c in ("competition", "season", "match_id", "match_date", "team", "opponent")
+        return pd.DataFrame(columns=["match_id", "team", "opponent", "goal_rate_for", "goal_rate_against", "xpoints"])
+    keys = [c for c in ("competition", "season", "match_id", "match_date", "team")
             if c in matches.columns]
-    base_keys = [c for c in ("competition", "season", "match_id", "team") if c in keys]
     work = matches.copy()
-    work["xg"] = pd.to_numeric(work["xg"], errors="coerce")
-    team = work.groupby(base_keys, dropna=False, as_index=False)["xg"].sum(min_count=1)
-    names = [c for c in ("match_date", "opponent") if c in work.columns]
-    if names:
-        meta = work.groupby(base_keys, dropna=False, as_index=False)[names].first()
-        team = team.merge(meta, on=base_keys, how="left")
-    team = team.rename(columns={"xg": "xg_for"})
-    pair_keys = [c for c in ("competition", "season", "match_id") if c in team.columns]
-    against = team[pair_keys + ["team", "xg_for"]].rename(
-        columns={"team": "opponent", "xg_for": "xg_against"})
-    team = team.merge(against, on=pair_keys + ["opponent"], how="left")
-    vals = [expected_points(a, b) for a, b in zip(team["xg_for"], team["xg_against"])]
+    for col in ("goals_for", "goals_against"):
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    team = work.groupby(keys, dropna=False, as_index=False).agg(
+        opponent=("opponent", "first"), goals_for=("goals_for", "first"),
+        goals_against=("goals_against", "first"))
+    team = team.sort_values(["match_date", "match_id", "team"]).reset_index(drop=True)
+    histories: dict[tuple[str, str, str], list[tuple[float, float]]] = {}
+    season_history: dict[tuple[str, str], list[float]] = {}
+    calculated = []
+
+    def rate(values, prior):
+        recent = np.asarray(values[-5:], dtype=float)
+        if not len(recent):
+            return float(prior)
+        weights = np.exp(-.30 * np.arange(len(recent) - 1, -1, -1, dtype=float))
+        return float((np.dot(recent, weights) + 3.0 * prior) / (weights.sum() + 3.0))
+
+    season_keys = [c for c in ("competition", "season") if c in team.columns]
+    match_groups = team.groupby("match_id", sort=False, dropna=False)
+    for match_id, match_rows in match_groups:
+        for ix, row in match_rows.iterrows():
+            season_key = tuple(str(row.get(k, "")) for k in season_keys)
+            team_key = season_key + (str(row["team"]),)
+            opp_key = season_key + (str(row["opponent"]),)
+            prior_vals = season_history.get(season_key, [])
+            prior = float(np.mean(prior_vals[-20:])) if prior_vals else 1.4
+            team_hist = histories.get(team_key, [])
+            opp_hist = histories.get(opp_key, [])
+            team_for = rate([x[0] for x in team_hist], prior)
+            team_against = rate([x[1] for x in team_hist], prior)
+            opp_for = rate([x[0] for x in opp_hist], prior)
+            opp_against = rate([x[1] for x in opp_hist], prior)
+            lam_for = .5 * (team_for + opp_against)
+            lam_against = .5 * (team_against + opp_for)
+            calculated.append((ix, lam_for, lam_against))
+        # Add both sides only after deriving predictions, so the match cannot leak into itself.
+        for _, row in match_rows.iterrows():
+            season_key = tuple(str(row.get(k, "")) for k in season_keys)
+            team_key = season_key + (str(row["team"]),)
+            histories.setdefault(team_key, []).append((float(row["goals_for"]), float(row["goals_against"])))
+            season_history.setdefault(season_key, []).append(float(row["goals_for"]))
+
+    rates = pd.DataFrame(calculated, columns=["row_index", "goal_rate_for", "goal_rate_against"]).set_index("row_index")
+    team = team.join(rates)
+    vals = [expected_points(a, b) for a, b in zip(team["goal_rate_for"], team["goal_rate_against"])]
     team[["p_win", "p_draw", "p_loss", "xpoints"]] = pd.DataFrame(vals, index=team.index)
     return team
 
 
 def project_team_xpoints(team_history: pd.DataFrame, window: int = 5) -> dict[str, float | int]:
-    """Project next-match team xPoints from recency-weighted recent xG for/against."""
-    hist = team_history.dropna(subset=["xg_for", "xg_against"]).sort_values("match_date").tail(window)
+    """Project next-match points from recent goals for/against, absent xG feed."""
+    hist = team_history.dropna(subset=["goals_for", "goals_against"]).sort_values("match_date").tail(window)
     if hist.empty:
-        return {"xg_for": np.nan, "xg_against": np.nan, "xpoints": np.nan, "matches": 0}
+        return {"goal_rate_for": np.nan, "goal_rate_against": np.nan, "xpoints": np.nan, "matches": 0}
     distances = np.arange(len(hist) - 1, -1, -1, dtype=float)
     weights = np.exp(-0.30 * distances)
-    xgf = float(np.average(hist["xg_for"].astype(float), weights=weights))
-    xga = float(np.average(hist["xg_against"].astype(float), weights=weights))
-    return {**expected_points(xgf, xga), "xg_for": xgf, "xg_against": xga, "matches": len(hist)}
+    goals_for_rate = float(np.average(hist["goals_for"].astype(float), weights=weights))
+    goals_against_rate = float(np.average(hist["goals_against"].astype(float), weights=weights))
+    return {**expected_points(goals_for_rate, goals_against_rate),
+            "goal_rate_for": goals_for_rate, "goal_rate_against": goals_against_rate,
+            "matches": len(hist)}
 
 
-FEATURES = ["form5", "form10", "form15", "consistency", "trend_points", "minutes5", "minutes10", "appearances", "goals5", "goals10", "xg5", "xg10", "xa5", "xa10", "shots5", "tackles5", "recoveries5", "pass_accuracy5", "days_rest"]
+FEATURES = ["form5", "form10", "form15", "consistency", "trend_points", "minutes5", "minutes10", "appearances", "goals5", "goals10", "assists5", "shots5", "shots_on_target5", "passes5", "tackles5", "tackles_won5", "clearances5", "fouls5", "saves5", "pass_accuracy5", "days_rest"]
 
 
 def make_training_rows(scored: pd.DataFrame, k: float = .65) -> pd.DataFrame:
@@ -179,15 +226,15 @@ def make_training_rows(scored: pd.DataFrame, k: float = .65) -> pd.DataFrame:
         for i in range(1, len(p)):
             hist = p.iloc[:i]
             target = p.iloc[i]
-            row = {"player_id": pid, "target_date": target["match_date"], "target_score": float(target["match_score"]), "position": target["position"]}
+            row = {"player_id": pid, "target_date": target["match_date"], "target_score": float(target["match_score"]), "position": hist.iloc[-1]["position"]}
             scores = hist["match_score"].to_numpy(float)
             mins = hist["minutes"].to_numpy(float)
             forms = {n: recency_form(scores[-n:], mins[-n:]) for n in WINDOWS}
             row.update({"form5": forms[5], "form10": forms[10], "form15": forms[15], "consistency": consistency_score(scores[-5:], k), "trend_points": float(scores[-5:].mean() - scores[-10:-5].mean()) if len(scores) >= 6 else 0.0,
                         "minutes5": float(mins[-5:].sum()), "minutes10": float(mins[-10:].sum()), "appearances": i})
-            for metric, col in [("goals", "goals"), ("xg", "xg"), ("xa", "xa"), ("shots", "shots"), ("tackles", "tackles"), ("recoveries", "recoveries")]:
+            for metric, col in [("goals", "goals"), ("assists", "assists"), ("shots", "shots"), ("shots_on_target", "shots_on_target"), ("passes", "passes"), ("tackles", "tackles"), ("tackles_won", "tackles_won"), ("clearances", "clearances"), ("fouls", "fouls"), ("saves", "saves")]:
                 row[f"{col}5"] = float(hist[metric].tail(5).sum())
-                if col in {"goals", "xg", "xa"}: row[f"{col}10"] = float(hist[metric].tail(10).sum())
+                if col in {"goals", "assists"}: row[f"{col}10"] = float(hist[metric].tail(10).sum())
             ps = hist["passes"].tail(5).sum()
             row["pass_accuracy5"] = float(hist["accurate_passes"].tail(5).sum() / ps) if ps else 0.0
             if pd.notna(target["match_date"]) and pd.notna(hist.iloc[-1]["match_date"]):

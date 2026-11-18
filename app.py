@@ -6,9 +6,7 @@ import streamlit as st
 from engines import calibrate_consistency_k, current_summary, latest_feature_row, prepare_match_scores, project_next_form, project_team_xpoints, team_match_xpoints, train_predictor
 
 ROOT = Path(__file__).resolve().parent
-API_DATA = ROOT / "data" / "processed" / "player_match_stats_api.csv"
-LEGACY_DATA = ROOT / "data" / "processed" / "player_match_stats.csv"
-DATA = API_DATA if API_DATA.exists() else LEGACY_DATA
+DATA = ROOT / "data" / "processed" / "player_match_stats_s3.csv"
 
 st.set_page_config(page_title="Player Form Lab", page_icon="⚽", layout="wide")
 st.title("⚽ Football Player Form Lab")
@@ -28,21 +26,21 @@ def fit_model(path: str, modified: float, k: float):
 
 if not DATA.exists():
     st.warning("The historical player-match dataset has not been built yet.")
-    st.code("python scripts/sync_pitchapi.py", language="powershell")
-    st.markdown("Add a free PitchAPI token to `.env` first. The importer caches each finished match's player stats and writes the current-season dataset.")
+    st.code("python scripts/sync_s3_opta.py", language="powershell")
+    st.markdown("Configure a read-only AWS profile locally. This importer reads only the provided S3 matchstats files and makes no football-data API calls.")
     st.stop()
 
 df = load_data(str(DATA), DATA.stat().st_mtime)
 if df.empty:
-    st.error("The dataset is empty. Rebuild it with `python scripts/build_dataset.py`.")
+    st.error("The dataset is empty. Rebuild it from S3 with `python scripts/sync_s3_opta.py`.")
     st.stop()
 latest_data_date = df["match_date"].max()
 xpoints_matches = team_match_xpoints(df)
 if pd.notna(latest_data_date):
-    if DATA == API_DATA:
-        st.info(f"PitchAPI match data through **{latest_data_date.strftime('%d %b %Y')}**. Scores reflect the latest finished match stats synced locally; run the sync script after match days to refresh.")
-    else:
-        st.warning(f"This is the old archived dataset through **{latest_data_date.strftime('%d %b %Y')}**. Add a PitchAPI key and run the sync script for 2026–27 data.")
+    age_days = max(0, int((pd.Timestamp.now(tz="UTC") - latest_data_date).total_seconds() // 86400))
+    st.info(f"Opta S3 match data through **{latest_data_date.strftime('%d %b %Y')}** · {age_days} days old. The app uses the latest locally synced S3 dataset.")
+    if age_days > 14:
+        st.warning("The S3 feed is more than two weeks behind today. Form and predictions cannot reflect matches that have not been added to the bucket.")
 
 with st.sidebar:
     st.header("Player lookup")
@@ -74,7 +72,7 @@ cards[0].metric("Current form", f"{summary['overall_form']:.0f} / 100", f"{summa
 cards[1].metric("Trend", summary["trend"])
 cards[2].metric("Consistency", f"{summary['consistency']:.0f} / 100", "last 5 appearances")
 cards[3].metric("Vs historical average", f"{summary['vs_history']:+.1f} pts", f"historical {summary['historical_average']:.1f}")
-cards[4].metric("Confidence", f"{summary['confidence']:.0%}", f"{summary['minutes_last_15']:.0f} minutes in last 15")
+cards[4].metric("Confidence", f"{summary['confidence']:.0%}", f"{summary['days_since_last_appearance']:.0f} days since appearance")
 
 left, right = st.columns([1.3, 1])
 with left:
@@ -123,7 +121,7 @@ with right:
         st.caption(f"The model forecasts the next match score; the form engine rolls that score forward using the assumed {next_minutes} minutes. It is a scenario, not a guaranteed outcome.")
 
 st.subheader("xPoints Engine · team context")
-st.caption("Expected team league points (0–3), estimated from team and opponent xG using Poisson goal probabilities. This follows the linked article's team-level method; it is not a fantasy-points score for an individual player.")
+st.caption("Team expected league points (0–3) from independent Poisson goal rates. The supplied S3 files have no xG or attack-level event feed, so this is a transparent recent-goals estimate, not the article's xDanger model or shot-based xG. It is team context, not individual fantasy points.")
 latest_player_row = player.iloc[-1]
 history_filter = pd.Series(True, index=xpoints_matches.index)
 for field in ("competition", "season", "team"):
@@ -134,15 +132,15 @@ outlook = project_team_xpoints(team_history)
 recent_xp = team_history.dropna(subset=["xpoints"]).tail(5)
 xp_cards = st.columns(4)
 xp_cards[0].metric("Next-match team xPoints", f"{outlook['xpoints']:.2f} / 3" if pd.notna(outlook["xpoints"]) else "Unavailable", f"from {outlook['matches']} recent team matches" if outlook["matches"] else None)
-xp_cards[1].metric("Projected team xG", f"{outlook['xg_for']:.2f}" if pd.notna(outlook["xg_for"]) else "Unavailable")
-xp_cards[2].metric("Projected opponent xG", f"{outlook['xg_against']:.2f}" if pd.notna(outlook["xg_against"]) else "Unavailable")
-xp_cards[3].metric("Recent actual xPoints", f"{recent_xp['xpoints'].mean():.2f} / 3" if not recent_xp.empty else "Unavailable", "mean of last 5 team matches")
+xp_cards[1].metric("Team goal rate", f"{outlook['goal_rate_for']:.2f}" if pd.notna(outlook["goal_rate_for"]) else "Unavailable", "weighted goals scored per match · last 5")
+xp_cards[2].metric("Opponent goal rate", f"{outlook['goal_rate_against']:.2f}" if pd.notna(outlook["goal_rate_against"]) else "Unavailable", "weighted goals conceded per match · last 5")
+xp_cards[3].metric("Recent xPoints projections", f"{recent_xp['xpoints'].mean():.2f} / 3" if not recent_xp.empty else "Unavailable", "mean of last 5 team matches")
 if not recent_xp.empty:
-    st.dataframe(recent_xp[["match_date", "team", "opponent", "xg_for", "xg_against", "p_win", "p_draw", "p_loss", "xpoints"]].sort_values("match_date", ascending=False), use_container_width=True, hide_index=True,
-                 column_config={"match_date": st.column_config.DateColumn("Match date"), "xg_for": st.column_config.NumberColumn("Team xG", format="%.2f"), "xg_against": st.column_config.NumberColumn("Opponent xG", format="%.2f"), "p_win": st.column_config.NumberColumn("Win prob.", format="%.0%%"), "p_draw": st.column_config.NumberColumn("Draw prob.", format="%.0%%"), "p_loss": st.column_config.NumberColumn("Loss prob.", format="%.0%%"), "xpoints": st.column_config.NumberColumn("xPoints", format="%.2f")})
+    st.dataframe(recent_xp[["match_date", "team", "opponent", "goal_rate_for", "goal_rate_against", "p_win", "p_draw", "p_loss", "xpoints"]].sort_values("match_date", ascending=False), use_container_width=True, hide_index=True,
+                 column_config={"match_date": st.column_config.DateColumn("Match date"), "goal_rate_for": st.column_config.NumberColumn("Goals scored / match", format="%.2f"), "goal_rate_against": st.column_config.NumberColumn("Goals conceded / match", format="%.2f"), "p_win": st.column_config.NumberColumn("Win prob.", format="%.0%%"), "p_draw": st.column_config.NumberColumn("Draw prob.", format="%.0%%"), "p_loss": st.column_config.NumberColumn("Loss prob.", format="%.0%%"), "xpoints": st.column_config.NumberColumn("xPoints", format="%.2f")})
 
 st.subheader("Recent appearances")
-show_cols = ["match_date", "competition", "season", "team", "opponent", "minutes", "match_score", "goals", "assists", "xg", "xa", "shots", "tackles", "recoveries", "pass_accuracy"]
+show_cols = ["match_date", "competition", "season", "team", "opponent", "minutes", "match_score", "goals", "assists", "shots", "shots_on_target", "tackles", "tackles_won", "clearances", "pass_accuracy"]
 recent = player.tail(10).copy()
 recent["opponent"] = recent.apply(lambda r: r["away_team"] if r["team"] == r["home_team"] else r["home_team"], axis=1)
 recent["pass_accuracy"] = (recent["pass_accuracy"] * 100).round(1)
@@ -153,13 +151,16 @@ with st.expander("Formula and data limitations"):
     st.markdown(r"""
 **Recent form:** `Form = 100 × Σ(wᵢPᵢ) / Σwᵢ`, with `wᵢ = exp(−λdᵢ) × √(minutesᵢ/90)`. F5, F10 and F15 are combined as `0.50 F5 + 0.30 F10 + 0.20 F15`.
 
-**Confidence:** `min(1, √(minutes in last 15 appearances / 450))`; adjusted form is `50 + confidence × (raw form − 50)`.
+**Confidence:** Minutes confidence is `min(1, √(minutes in last 15 appearances / 450))`. It is multiplied by a calendar freshness factor `exp(−max(0, days_since_last_appearance − 7)/90)`; adjusted form is `50 + confidence × (raw form − 50)`. This reduces certainty after long breaks, but does not label their cause.
 
 **Match score:** weighted percentiles for role-relevant per-90 stats within position, competition and season. Higher is better; adverse events are reverse ranked. Consistency is `100 − min(100, k × sample SD)` for the last five scores, where `k` is calibrated so the dataset median five-match dispersion maps to a 30-point deduction.
 
-**Prediction:** Random Forest regression uses only previous appearances to predict the next match's score. The chronological holdout is compared with the recent-form formula as a simple baseline. xG/xA and defensive event coverage depend on what StatsBomb recorded; opponent strength, team form and injury context are not included in this first version. StatsBomb IDs are source-specific, and the dataset covers selected competitions only.
-**xPoints:** Follows McKay Johns' team-level method: use each side's xG as its Poisson goal rate, derive win/draw/loss probabilities, then `xPts = 3 × P(win) + P(draw)`. The upcoming estimate uses recency-weighted xG from up to five team matches in this competition-season. It is team league points shown as context for the selected player, not a player fantasy-points prediction. [Reference article](https://mckayjohns.substack.com/p/how-to-calculate-expected-points).
+**Prediction:** Random Forest regression uses only earlier appearances to predict the next match-score percentile. Its chronological holdout is compared with the recent-form formula. The S3 matchstats feed supplies stable Opta IDs, minutes, goals, assists, shots, passing, tackles, clearances and cards; it has no xG, xA, injury status, interceptions or recoveries.
+
+**Breaks and availability:** `days_rest` is the calendar-day gap between a player's appearances and is a model feature. Long gaps can mean injury, rotation, suspension, transfer or missing feed data; this source cannot distinguish them. The app does not claim a player is injured without explicit injury records.
+
+**xPoints:** The article calculates expected points from goal probabilities using `3 × P(win) + P(draw)`. The S3 files do not include shot-level xG or attack sequences, so this app estimates goal rates from recent team goals and applies independent Poisson score probabilities. It is not the article's xDanger calculation. [Marc Lamberts' xDanger article](https://marclamberts.medium.com/introducing-xdanger-one-ecosystem-for-shot-models-possession-value-models-and-ratings-a00f51663a1d).
 """)
-    st.caption("Data: PitchAPI when the current dataset is present; otherwise the app uses its archived fallback dataset.")
+    st.caption("Data: Opta S3 matchstats in the provided buckets; no football-data API calls are made.")
 
 st.caption(f"Dataset file: {DATA.relative_to(ROOT)}")

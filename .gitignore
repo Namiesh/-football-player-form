@@ -32,8 +32,8 @@ data/raw/*
 # Processed datasets for the app (tracked so Streamlit Cloud has the latest data)
 data/processed/*
 !data/processed/.gitkeep
-!data/processed/player_match_stats.csv
-!data/processed/player_match_stats_api.csv
+!data/processed/player_match_stats_s3.csv
+!data/processed/player_match_stats_2026_2027.csv
 
 # IDE & OS files
 .vscode/

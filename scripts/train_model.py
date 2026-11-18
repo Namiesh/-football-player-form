@@ -1,4 +1,4 @@
-"""Train and save the predictor from the locally synced player-match dataset."""
+"""Train and save the predictor from the locally synced Premier League S3 dataset."""
 import json
 import sys
 from pathlib import Path
@@ -10,13 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from engines import FEATURES, calibrate_consistency_k, prepare_match_scores, train_predictor
 
-DATA = ROOT / "data" / "processed" / "player_match_stats_api.csv"
+DATA = ROOT / "data" / "processed" / "player_match_stats_s3.csv"
 MODEL_DIR = ROOT / "models"
 
 
 def main():
     if not DATA.exists():
-        raise SystemExit("Run scripts/sync_pitchapi.py first to build the API dataset.")
+        raise SystemExit("Run scripts/sync_s3_opta.py first to build the S3 dataset.")
     raw = pd.read_csv(DATA)
     scored = prepare_match_scores(raw)
     k = calibrate_consistency_k(scored)
@@ -29,7 +29,7 @@ def main():
         "model": model,
         "features": FEATURES,
         "consistency_k": k,
-        "data_source": "PitchAPI",
+        "data_source": "Opta S3 matchstats",
         "dataset": str(DATA.relative_to(ROOT)),
         "last_match": str(scored["match_date"].max()),
         "training_rows": len(training_rows),
